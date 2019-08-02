@@ -9,28 +9,33 @@ import pickle
 from scipy.spatial.distance import *
 
 class mh_predict:
-	def __init__(self,carbon,community,p_carb=10,p_com=10,level='Family',n_train=10,alpha_lasso=1,alpha_ridge=1e4):
+	def __init__(self,carbon,community,p_carb=10,p_com=10,level='Family',n_train=10,n_test=10,alpha_lasso=1,alpha_ridge=1e4,reduce_dimension=True,test_data=None):
 
-		#Reduce dimension of flux data
+		#Format tables for carbons
 		carbon_table = pd.pivot_table(carbon,values='Flux',columns='Reaction',index='Carbon_Source',aggfunc=np.sum,fill_value=0)
 		carbon_metadata = pd.pivot_table(carbon,values='Type',index='Carbon_Source',aggfunc='first')
-		PCA_model = PCA(n_components=p_carb).fit(carbon_table)
-		explained_variance = np.around(100*PCA_model.explained_variance_ratio_,decimals=1)
-		carbon_table = pd.DataFrame(PCA_model.transform(carbon_table),columns=['PC '+str(k+1) for k in range(p_carb)],index=carbon_table.index)
-
 		#Find carbon sources for which no flux data is available
 		no_data = list(set(community['Carbon_Source'])-set(carbon_table.index)) 
 
-		#Reduce dimension of community data
+		#Format tables for community
 		Y = pd.pivot_table(community,values='Relative_Abundance',columns=level,index=['Carbon_Source','Inoculum','Replicate'],aggfunc=np.sum,fill_value=0)
 		Y = Y.drop(no_data)
+		#Keep only top p_com most abundant families
 		chosen = Y.sum().sort_values(ascending=False).index[:p_com]
+		if test_data is not None:
+			no_data_test = list(set(test_data['Carbon_Source'])-set(carbon_table.index))
+			chosen = list(set(chosen).intersection(set(test_data[level])))
 		Y = Y.T.loc[chosen].T
+
+		if reduce_dimension:
+			#reduce dimension of carbon vector using PCA
+			PCA_model = PCA(n_components=p_carb).fit(carbon_table)
+			carbon_table = pd.DataFrame(PCA_model.transform(carbon_table),columns=['PC '+str(k+1) for k in range(p_carb)],index=carbon_table.index)
 
 		#Expand flux data to have one row per experiment
 		first = True
-		for inoc in Y.index.levels[1]:
-			for rep in Y.index.levels[2]:
+		for inoc in set(community['Inoculum']):
+			for rep in set(community['Replicate']):
 				X_new = carbon_table.copy()
 				X_new['Inoculum'] = inoc
 				X_new['Replicate'] = rep
@@ -40,34 +45,67 @@ class mh_predict:
 					first = False
 				else:
 					X = X.append(X_new)
+		if test_data is not None:
+			first = True
+			for inoc in set(test_data['Inoculum']):
+				for rep in set(test_data['Replicate']):
+					X_new = carbon_table.copy()
+					X_new['Inoculum'] = inoc
+					X_new['Replicate'] = rep
+					X_new = X_new.set_index(['Inoculum','Replicate'],append=True)
+					if first:
+						self.X_test = X_new
+						first = False
+					else:
+						self.X_test = self.X_test.append(X_new)
     
     	#Create training and test sets, ensuring that the training set has at least one sugar and one acid       
 		go = True
 		k=0
 		while go and k<1000:
-			train = np.random.choice(list(set(Y.index.levels[0])-set(no_data)),size=n_train,replace=False)
-			test = list(set(Y.index.levels[0])-set(no_data)-set(train))
+			if test_data is None:
+				train = np.random.choice(list(set(community['Carbon_Source'])-set(no_data)),size=n_train,replace=False)
+				test = list(set(community['Carbon_Source'])-set(no_data)-set(train))
+			else:
+				if len(set(test_data['Carbon_Source'])-set(no_data_test))<len(set(community['Carbon_Source'])):
+					test = np.random.choice(list(set(test_data['Carbon_Source'])-set(no_data_test)),size=n_test,replace=False)
+					train = list(set(community['Carbon_Source'])-set(no_data)-set(test))
+				else:
+					train = np.random.choice(list(set(community['Carbon_Source'])-set(no_data)),size=n_train,replace=False)
+					test = list(set(test_data['Carbon_Source'])-set(no_data_test)-set(train))
 			t = list(carbon_metadata.reindex(train)['Type'])
 			k+=1
 			if 'A' in t and ('MS' in t or 'DS' in t):
 				go = False
-		del carbon_metadata
 
+		self.train = train
 		self.Y_train = Y.loc[train]
 		self.X_train = X.reindex(self.Y_train.index)
-		self.Y_test = Y.loc[test]
-		self.X_test = X.reindex(self.Y_test.index)
+		if test_data is not None:
+			self.Y_test = pd.pivot_table(test_data,values='Relative_Abundance',columns=level,index=['Carbon_Source','Inoculum','Replicate'],aggfunc=np.sum,fill_value=0)
+			self.Y_test = self.Y_test.drop(no_data_test)
+			self.Y_test = self.Y_test.T.loc[chosen].T
+			self.Y_test = self.Y_test.loc[test]
+			self.X_test = self.X_test.reindex(self.Y_test.index)
+		else:
+			self.Y_test = Y.loc[test]
+			self.X_test = X.reindex(self.Y_test.index)
 		self.alpha_lasso = alpha_lasso
 		self.alpha_ridge = alpha_ridge
 		self.p_carb = p_carb
 		self.p_com = p_com
 		self.level = level
 
+		self.X_test = self.X_test.join(carbon_metadata['Type']).set_index('Type',append=True).reorder_levels([3,0,1,2]).astype(float)
+		self.Y_test = self.Y_test.join(carbon_metadata['Type']).set_index('Type',append=True).reorder_levels([3,0,1,2]).astype(float)
+		self.X_train = self.X_train.join(carbon_metadata['Type']).set_index('Type',append=True).reorder_levels([3,0,1,2]).astype(float)
+		self.Y_train = self.Y_train.join(carbon_metadata['Type']).set_index('Type',append=True).reorder_levels([3,0,1,2]).astype(float)
+
 	def run_lasso(self,cross_validate=False,plot=False):
 		self.lasso=Lasso()
 
 		if cross_validate:
-			alphas = np.logspace(-2, 2, 10)
+			alphas = np.logspace(-3, 2, 15)
 			r2_train = []
 			r2_test = []
 			coeffs = []
@@ -105,7 +143,7 @@ class mh_predict:
 		self.ridge=Ridge()
 
 		if cross_validate:
-			alphas = np.logspace(2, 6, 10)
+			alphas = np.logspace(1, 6, 15)
 			r2_train = []
 			r2_test = []
 			coeffs = []
