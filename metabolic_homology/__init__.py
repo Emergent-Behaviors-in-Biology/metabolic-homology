@@ -101,11 +101,11 @@ class mh_predict:
 		self.X_train = self.X_train.join(carbon_metadata['Type']).set_index('Type',append=True).reorder_levels([3,0,1,2]).astype(float)
 		self.Y_train = self.Y_train.join(carbon_metadata['Type']).set_index('Type',append=True).reorder_levels([3,0,1,2]).astype(float)
 
-	def run_lasso(self,cross_validate=False,plot=False):
+	def run_lasso(self,cross_validate=False,plot=False,lb=-3,ub=2,ns=15):
 		self.lasso=Lasso()
 
 		if cross_validate:
-			alphas = np.logspace(-3, 2, 15)
+			alphas = np.logspace(lb, ub, ns)
 			r2_train = []
 			r2_test = []
 			coeffs = []
@@ -139,11 +139,11 @@ class mh_predict:
 
 		return self.lasso.coef_, self.r2_train_lasso, self.r2_test_lasso
 
-	def run_ridge(self,cross_validate=False,plot=False):
+	def run_ridge(self,cross_validate=False,plot=False,lb=1,ub=6,ns=15):
 		self.ridge=Ridge()
 
 		if cross_validate:
-			alphas = np.logspace(1, 6, 15)
+			alphas = np.logspace(lb, ub, ns)
 			r2_train = []
 			r2_test = []
 			coeffs = []
