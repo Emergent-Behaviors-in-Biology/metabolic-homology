@@ -13,10 +13,11 @@ class mh_predict:
 
 		#Format tables for carbons
 		carbon_table = pd.pivot_table(carbon,values='Flux',columns='Reaction',index='Carbon_Source',aggfunc=np.sum,fill_value=0)
-		carbon_metadata = pd.pivot_table(carbon,values='Type',index='Carbon_Source',aggfunc='first')
+		carbon_metadata = pd.pivot_table(carbon,values='Category',index='Carbon_Source',aggfunc='first')
 		#Find carbon sources for which no flux data is available
 		no_data = list(set(community['Carbon_Source'])-set(carbon_table.index)) 
-
+		if len(no_data) > 0:
+			print('Dropped training CS missing from carbon data: '+', '.join(no_data))
 		#Format tables for community
 		Y = pd.pivot_table(community,values='Relative_Abundance',columns=level,index=['Carbon_Source','Inoculum','Replicate'],aggfunc=np.sum,fill_value=0)
 		Y = Y.drop(no_data)
@@ -24,6 +25,8 @@ class mh_predict:
 		chosen = Y.sum().sort_values(ascending=False).index[:p_com]
 		if test_data is not None:
 			no_data_test = list(set(test_data['Carbon_Source'])-set(carbon_table.index))
+			if len(no_data_test) > 0:
+				print('Dropped test CS missing from carbon data: '+', '.join(no_data_test))
 			chosen = list(set(chosen).intersection(set(test_data[level])))
 		Y = Y.T.loc[chosen].T
 
@@ -73,9 +76,9 @@ class mh_predict:
 				else:
 					train = np.random.choice(list(set(community['Carbon_Source'])-set(no_data)),size=n_train,replace=False)
 					test = list(set(test_data['Carbon_Source'])-set(no_data_test)-set(train))
-			t = list(carbon_metadata.reindex(train)['Type'])
+			t = list(carbon_metadata.reindex(train)['Category'])
 			k+=1
-			if 'A' in t and ('MS' in t or 'DS' in t):
+			if 'F' in t and 'R' in t:
 				go = False
 
 		self.train = train
@@ -96,13 +99,13 @@ class mh_predict:
 		self.p_com = p_com
 		self.level = level
 
-		self.X_test = self.X_test.join(carbon_metadata['Type']).set_index('Type',append=True).reorder_levels([3,0,1,2]).astype(float)
-		self.Y_test = self.Y_test.join(carbon_metadata['Type']).set_index('Type',append=True).reorder_levels([3,0,1,2]).astype(float)
-		self.X_train = self.X_train.join(carbon_metadata['Type']).set_index('Type',append=True).reorder_levels([3,0,1,2]).astype(float)
-		self.Y_train = self.Y_train.join(carbon_metadata['Type']).set_index('Type',append=True).reorder_levels([3,0,1,2]).astype(float)
+		self.X_test = self.X_test.join(carbon_metadata['Category']).set_index('Category',append=True).reorder_levels([3,0,1,2]).astype(float)
+		self.Y_test = self.Y_test.join(carbon_metadata['Category']).set_index('Category',append=True).reorder_levels([3,0,1,2]).astype(float)
+		self.X_train = self.X_train.join(carbon_metadata['Category']).set_index('Category',append=True).reorder_levels([3,0,1,2]).astype(float)
+		self.Y_train = self.Y_train.join(carbon_metadata['Category']).set_index('Category',append=True).reorder_levels([3,0,1,2]).astype(float)
 
 	def run_lasso(self,cross_validate=False,plot=False,lb=-3,ub=2,ns=15):
-		self.lasso=Lasso()
+		self.lasso=Lasso(max_iter=10000)
 
 		if cross_validate:
 			alphas = np.logspace(lb, ub, ns)
@@ -140,7 +143,7 @@ class mh_predict:
 		return self.lasso.coef_, self.r2_train_lasso, self.r2_test_lasso
 
 	def run_ridge(self,cross_validate=False,plot=False,lb=1,ub=6,ns=15):
-		self.ridge=Ridge()
+		self.ridge=Ridge(max_iter=10000)
 
 		if cross_validate:
 			alphas = np.logspace(lb, ub, ns)
