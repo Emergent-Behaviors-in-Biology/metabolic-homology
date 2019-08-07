@@ -8,12 +8,26 @@ from sklearn.metrics import r2_score
 import pickle
 from scipy.spatial.distance import *
 
+def r2_bc(y_true,y_pred,y_null):
+    y_true = np.hstack([y_true,(1-y_true.sum(axis=1))[:,np.newaxis]])
+    y_pred = np.hstack([y_pred,(1-y_pred.sum(axis=1))[:,np.newaxis]])
+    y_null = np.hstack([y_null,(1-y_null.sum(axis=1))[:,np.newaxis]])
+    
+    d = []
+    for k in range(len(y_true)):
+	    d.append(cdist(y_true[k,:][np.newaxis,:],y_pred[k,:][np.newaxis,:],metric='braycurtis'))
+    d = np.asarray(d)
+    d_null = cdist(y_true,y_null,metric='braycurtis')
+    return (d_null-d).mean()/d_null.mean()
+
 class mh_predict:
-	def __init__(self,carbon,community,p_carb=10,p_com=10,level='Family',n_train=10,n_test=10,alpha_lasso=1,alpha_ridge=1e4,reduce_dimension=True,test_data=None):
+	def __init__(self,carbon,community,p_carb=10,p_com=10,level='Family',n_train=10,n_test=10,alpha_lasso=1,alpha_ridge=1e4,reduce_dimension=True,test_data=None,norm=None,perform='Bray-Curtis'):
 
 		#Format tables for carbons
 		carbon_table = pd.pivot_table(carbon,values='Flux',columns='Reaction',index='Carbon_Source',aggfunc=np.sum,fill_value=0)
 		carbon_metadata = pd.pivot_table(carbon,values='Category',index='Carbon_Source',aggfunc='first')
+		if norm is not None:
+			carbon_table = carbon_table.div(norm,axis=0)
 		#Find carbon sources for which no flux data is available
 		no_data = list(set(community['Carbon_Source'])-set(carbon_table.index)) 
 		if len(no_data) > 0:
@@ -81,6 +95,7 @@ class mh_predict:
 			if 'F' in t and 'R' in t:
 				go = False
 
+		self.perform = perform
 		self.train = train
 		self.Y_train = Y.loc[train]
 		self.X_train = X.reindex(self.Y_train.index)
@@ -103,6 +118,7 @@ class mh_predict:
 		self.Y_test = self.Y_test.join(carbon_metadata['Category']).set_index('Category',append=True).reorder_levels([3,0,1,2]).astype(float)
 		self.X_train = self.X_train.join(carbon_metadata['Category']).set_index('Category',append=True).reorder_levels([3,0,1,2]).astype(float)
 		self.Y_train = self.Y_train.join(carbon_metadata['Category']).set_index('Category',append=True).reorder_levels([3,0,1,2]).astype(float)
+		self.Y_null = self.Y_train.mean().values[np.newaxis,:]
 
 	def run_lasso(self,cross_validate=False,plot=False,lb=-3,ub=2,ns=15):
 		self.lasso=Lasso(max_iter=10000)
@@ -115,8 +131,12 @@ class mh_predict:
 			for a in alphas:
 				self.lasso.set_params(alpha=a)
 				self.lasso.fit(self.X_train, self.Y_train)
-				r2_train.append(r2_score(self.Y_train.values,self.lasso.predict(self.X_train),multioutput='variance_weighted'))
-				r2_test.append(r2_score(self.Y_test.values,self.lasso.predict(self.X_test),multioutput='variance_weighted'))
+				if self.perform == 'Bray-Curtis':
+					r2_train.append(r2_bc(self.Y_train.values,self.lasso.predict(self.X_train),self.Y_null))
+					r2_test.append(r2_bc(self.Y_test.values,self.lasso.predict(self.X_test),self.Y_null))
+				else:
+					r2_train.append(r2_score(self.Y_train.values,self.lasso.predict(self.X_train),multioutput='variance_weighted'))
+					r2_test.append(r2_score(self.Y_test.values,self.lasso.predict(self.X_test),multioutput='variance_weighted'))
 				coeffs.append(self.lasso.coef_.reshape(-1))
 			self.alpha_lasso = alphas[np.argmax(r2_test)]
 			if plot:
@@ -127,7 +147,7 @@ class mh_predict:
 				plt.show()
 				plt.semilogx(alphas,r2_train,'k',label='Train')
 				plt.semilogx(alphas,r2_test,'k--',label='Test')
-				plt.ylabel(r'Performance ($R^2$)')
+				plt.ylabel(r'Performance ('+self.perform+')')
 				plt.xlabel(r'$\alpha$')
 				plt.title('Lasso Performance')
 				plt.ylim([-0.01, 1.0])
@@ -137,8 +157,12 @@ class mh_predict:
 		self.lasso.set_params(alpha=self.alpha_lasso)
 		self.lasso.fit(self.X_train, self.Y_train)
 		self.Y_pred_lasso = pd.DataFrame(self.lasso.predict(self.X_test),index=self.Y_test.index,columns=self.Y_test.keys())
-		self.r2_train_lasso = r2_score(self.Y_train.values,self.lasso.predict(self.X_train),multioutput='variance_weighted')
-		self.r2_test_lasso = r2_score(self.Y_test.values,self.lasso.predict(self.X_test),multioutput='variance_weighted')
+		if self.perform == 'Bray-Curtis':
+			self.r2_train_lasso = r2_bc(self.Y_train.values,self.lasso.predict(self.X_train),self.Y_null)
+			self.r2_test_lasso = r2_bc(self.Y_test.values,self.lasso.predict(self.X_test),self.Y_null)
+		else:
+			self.r2_train_lasso = r2_score(self.Y_train.values,self.lasso.predict(self.X_train),multioutput='variance_weighted')
+			self.r2_test_lasso = r2_score(self.Y_test.values,self.lasso.predict(self.X_test),multioutput='variance_weighted')
 
 		return self.lasso.coef_, self.r2_train_lasso, self.r2_test_lasso
 
@@ -153,8 +177,12 @@ class mh_predict:
 			for a in alphas:
 				self.ridge.set_params(alpha=a)
 				self.ridge.fit(self.X_train, self.Y_train)
-				r2_train.append(r2_score(self.Y_train.values,self.ridge.predict(self.X_train),multioutput='variance_weighted'))
-				r2_test.append(r2_score(self.Y_test.values,self.ridge.predict(self.X_test),multioutput='variance_weighted'))
+				if self.perform == 'Bray-Curtis':
+					r2_train.append(r2_bc(self.Y_train.values,self.ridge.predict(self.X_train),self.Y_null))
+					r2_test.append(r2_bc(self.Y_test.values,self.ridge.predict(self.X_test),self.Y_null))
+				else:
+					r2_train.append(r2_score(self.Y_train.values,self.ridge.predict(self.X_train),multioutput='variance_weighted'))
+					r2_test.append(r2_score(self.Y_test.values,self.ridge.predict(self.X_test),multioutput='variance_weighted'))
 				coeffs.append(self.ridge.coef_.reshape(-1))
 			self.alpha_ridge = alphas[np.argmax(r2_test)]
 			if plot:
@@ -165,7 +193,7 @@ class mh_predict:
 				plt.show()
 				plt.semilogx(alphas,r2_train,'k',label='Train')
 				plt.semilogx(alphas,r2_test,'k--',label='Test')
-				plt.ylabel(r'Performance ($R^2$)')
+				plt.ylabel(r'Performance ('+self.perform+')')
 				plt.xlabel(r'$\alpha$')
 				plt.title('Ridge Performance')
 				plt.ylim([-0.01, 1.0])
@@ -175,17 +203,25 @@ class mh_predict:
 		self.ridge.set_params(alpha=self.alpha_ridge)
 		self.ridge.fit(self.X_train, self.Y_train)
 		self.Y_pred_ridge = pd.DataFrame(self.ridge.predict(self.X_test),index=self.Y_test.index,columns=self.Y_test.keys())
-		self.r2_train_ridge = r2_score(self.Y_train.values,self.ridge.predict(self.X_train),multioutput='variance_weighted')
-		self.r2_test_ridge = r2_score(self.Y_test.values,self.ridge.predict(self.X_test),multioutput='variance_weighted')
-
+		if self.perform == 'Bray-Curtis':
+			self.r2_train_ridge = r2_bc(self.Y_train.values,self.ridge.predict(self.X_train),self.Y_null)
+			self.r2_test_ridge = r2_bc(self.Y_test.values,self.ridge.predict(self.X_test),self.Y_null)
+		else:
+			self.r2_train_ridge = r2_score(self.Y_train.values,self.ridge.predict(self.X_train),multioutput='variance_weighted')
+			self.r2_test_ridge = r2_score(self.Y_test.values,self.ridge.predict(self.X_test),multioutput='variance_weighted')
+	
 		return self.ridge.coef_, self.r2_train_ridge, self.r2_test_ridge
 
 	def run_linear(self):
 		self.linear=LinearRegression()
 		self.linear.fit(self.X_train, self.Y_train)
 		self.Y_pred_linear = pd.DataFrame(self.linear.predict(self.X_test),index=self.Y_test.index,columns=self.Y_test.keys())
-		self.r2_train_linear = r2_score(self.Y_train.values,self.linear.predict(self.X_train),multioutput='variance_weighted')
-		self.r2_test_linear = r2_score(self.Y_test.values,self.linear.predict(self.X_test),multioutput='variance_weighted')
+		if self.perform == 'Bray-Curtis':
+			self.r2_train_linear = r2_bc(self.Y_train.values,self.linear.predict(self.X_train),self.Y_null)
+			self.r2_test_linear = r2_bc(self.Y_test.values,self.linear.predict(self.X_test),self.Y_null)
+		else:
+			self.r2_train_linear = r2_score(self.Y_train.values,self.linear.predict(self.X_train),multioutput='variance_weighted')
+			self.r2_test_linear = r2_score(self.Y_test.values,self.linear.predict(self.X_test),multioutput='variance_weighted')
 
 		return self.linear.coef_, self.r2_train_linear, self.r2_test_linear
 
@@ -198,7 +234,10 @@ class mh_predict:
 			x = np.ones((len(X_train),1)).dot(self.X_test.loc[idx].values[np.newaxis,:])
 			nn = X_train.index[np.argmin(cdist(x,X_train.values,metric = metric))]
 			Y_pred.loc[idx] = Y_train.loc[nn]
-		self.r2_test_KNN = r2_score(self.Y_test.values,Y_pred.values,multioutput='variance_weighted')
+		if self.perform == 'Bray-Curtis':
+			self.r2_test_KNN = r2_bc(self.Y_test.values,Y_pred.values,self.Y_null)
+		else:
+			self.r2_test_KNN = r2_score(self.Y_test.values,Y_pred.values,multioutput='variance_weighted')
 		self.Y_pred_KNN = Y_pred
 
 		return self.r2_test_KNN
