@@ -4,7 +4,12 @@ import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from sklearn.linear_model import LinearRegression, Ridge, Lasso
+from sklearn.model_selection import GroupShuffleSplit, GridSearchCV
 from sklearn.metrics import r2_score
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 import pickle
 from scipy.spatial.distance import *
 
@@ -20,6 +25,12 @@ def r2_bc(y_true,y_pred,y_null):
     d_null = cdist(y_true,y_null,metric='braycurtis')
     return (d_null-d).mean()/d_null.mean()
 
+def best_alpha_UCB(cv_results):
+	UCB = cv_results['mean_test_score']+cv_results['std_test_score']
+	return np.argmax(UCB)
+
+
+
 class mh_predict:
 	def __init__(self,carbon,community,p_carb=10,p_com=10,level='Family',n_train=10,n_test=10,alpha_lasso=1,alpha_ridge=1e4,reduce_dimension=True,test_data=None,norm=None,perform='Bray-Curtis'):
 
@@ -28,31 +39,10 @@ class mh_predict:
 		carbon_metadata = pd.pivot_table(carbon,values='Category',index='Carbon_Source',aggfunc='first')
 		if norm is not None:
 			carbon_table = carbon_table.div(norm,axis=0)
-		#Find carbon sources for which no flux data is available
-		no_data = list(set(community['Carbon_Source'])-set(carbon_table.index)) 
-		if len(no_data) > 0:
-			print('Dropped training CS missing from carbon data: '+', '.join(no_data))
-		#Format tables for community
-		Y = pd.pivot_table(community,values='Relative_Abundance',columns=level,index=['Carbon_Source','Inoculum','Replicate'],aggfunc=np.sum,fill_value=0)
-		Y = Y.drop(no_data)
-		#Keep only top p_com most abundant families
-		chosen = Y.sum().sort_values(ascending=False).index[:p_com]
-		if test_data is not None:
-			no_data_test = list(set(test_data['Carbon_Source'])-set(carbon_table.index))
-			if len(no_data_test) > 0:
-				print('Dropped test CS missing from carbon data: '+', '.join(no_data_test))
-			chosen = list(set(chosen).intersection(set(test_data[level])))
-		Y = Y.T.loc[chosen].T
-
-		if reduce_dimension:
-			#reduce dimension of carbon vector using PCA
-			PCA_model = PCA(n_components=p_carb).fit(carbon_table)
-			carbon_table = pd.DataFrame(PCA_model.transform(carbon_table),columns=['PC '+str(k+1) for k in range(p_carb)],index=carbon_table.index)
-
 		#Expand flux data to have one row per experiment
 		first = True
-		for inoc in set(community['Inoculum']):
-			for rep in set(community['Replicate']):
+		for inoc in range(10):
+			for rep in range(10):
 				X_new = carbon_table.copy()
 				X_new['Inoculum'] = inoc
 				X_new['Replicate'] = rep
@@ -62,21 +52,30 @@ class mh_predict:
 					first = False
 				else:
 					X = X.append(X_new)
+		if reduce_dimension:
+			#reduce dimension of carbon vector using PCA
+			PCA_model = PCA(n_components=p_carb).fit(carbon_table)
+			carbon_table = pd.DataFrame(PCA_model.transform(carbon_table),columns=['PC '+str(k+1) for k in range(p_carb)],index=carbon_table.index)
+
+
+		#Format tables for community
+		Y = pd.pivot_table(community,values='Relative_Abundance',columns=level,index=['Carbon_Source','Inoculum','Replicate'],aggfunc=np.sum,fill_value=0)
+		#Find carbon sources for which no flux data is available
+		no_data = list(set(community['Carbon_Source'])-set(carbon_table.index)) 
+		if len(no_data) > 0:
+			print('Dropped training CS missing from carbon data: '+', '.join(no_data))
+		Y = Y.drop(no_data)
+		#Keep only top p_com most abundant families, and make sure they are also in test data
+		chosen = Y.sum().sort_values(ascending=False).index[:p_com]
 		if test_data is not None:
-			first = True
-			for inoc in set(test_data['Inoculum']):
-				for rep in set(test_data['Replicate']):
-					X_new = carbon_table.copy()
-					X_new['Inoculum'] = inoc
-					X_new['Replicate'] = rep
-					X_new = X_new.set_index(['Inoculum','Replicate'],append=True)
-					if first:
-						self.X_test = X_new
-						first = False
-					else:
-						self.X_test = self.X_test.append(X_new)
+			no_data_test = list(set(test_data['Carbon_Source'])-set(carbon_table.index))
+			if len(no_data_test) > 0:
+				print('Dropped test CS missing from carbon data: '+', '.join(no_data_test))
+			chosen = list(set(chosen).intersection(set(test_data[level])))
+		Y = Y.T.loc[chosen].T
     
-    	#Create training and test sets, ensuring that the training set has at least one sugar and one acid       
+    	#Create training and test sets with non-overlapping carbon sources, 
+    	#ensuring that the training set has at least one sugar and one acid       
 		go = True
 		k=0
 		while go and k<1000:
@@ -104,10 +103,9 @@ class mh_predict:
 			self.Y_test = self.Y_test.drop(no_data_test)
 			self.Y_test = self.Y_test.T.loc[chosen].T
 			self.Y_test = self.Y_test.loc[test]
-			self.X_test = self.X_test.reindex(self.Y_test.index)
 		else:
 			self.Y_test = Y.loc[test]
-			self.X_test = X.reindex(self.Y_test.index)
+		self.X_test = X.reindex(self.Y_test.index)
 		self.alpha_lasso = alpha_lasso
 		self.alpha_ridge = alpha_ridge
 		self.p_carb = p_carb
@@ -120,42 +118,26 @@ class mh_predict:
 		self.Y_train = self.Y_train.join(carbon_metadata['Category']).set_index('Category',append=True).reorder_levels([3,0,1,2]).astype(float)
 		self.Y_null = self.Y_train.mean().values[np.newaxis,:]
 
-	def run_lasso(self,cross_validate=False,plot=False,lb=-3,ub=2,ns=15):
-		self.lasso=Lasso(max_iter=10000)
-
+	def run_lasso(self,cross_validate=False,plot=False,lb=-3,ub=2,ns=15,n_splits=50):
 		if cross_validate:
-			alphas = np.logspace(lb, ub, ns)
-			r2_train = []
-			r2_test = []
-			coeffs = []
-			for a in alphas:
-				self.lasso.set_params(alpha=a)
-				self.lasso.fit(self.X_train, self.Y_train)
-				if self.perform == 'Bray-Curtis':
-					r2_train.append(r2_bc(self.Y_train.values,self.lasso.predict(self.X_train),self.Y_null))
-					r2_test.append(r2_bc(self.Y_test.values,self.lasso.predict(self.X_test),self.Y_null))
-				else:
-					r2_train.append(r2_score(self.Y_train.values,self.lasso.predict(self.X_train),multioutput='variance_weighted'))
-					r2_test.append(r2_score(self.Y_test.values,self.lasso.predict(self.X_test),multioutput='variance_weighted'))
-				coeffs.append(self.lasso.coef_.reshape(-1))
-			self.alpha_lasso = alphas[np.argmax(r2_test)]
+			params = {'alpha':np.logspace(lb, ub, ns)}
+			self.lasso = GridSearchCV(Lasso(max_iter=10000),params,cv=GroupShuffleSplit(n_splits=n_splits).split(self.X_train,groups=self.X_train.reset_index()['Carbon_Source']),
+				refit = best_alpha_UCB)
+			self.lasso.fit(self.X_train, self.Y_train)
+			self.lasso.coef_ = self.lasso.best_estimator_.coef_
+			self.alpha_lasso = self.lasso.best_estimator_.alpha
 			if plot:
-				plt.semilogx(alphas,np.abs(coeffs))
-				plt.xlabel(r'$\alpha$')
-				plt.ylabel(r'$|w_i|$')
-				plt.title('Lasso Coefficients')
-				plt.show()
-				plt.semilogx(alphas,r2_train,'k',label='Train')
-				plt.semilogx(alphas,r2_test,'k--',label='Test')
-				plt.ylabel(r'Performance ('+self.perform+')')
+				for splitname in ['split'+str(k)+'_test_score' for k in range(n_splits)]:
+					plt.semilogx(self.lasso.cv_results_['param_alpha'],self.lasso.cv_results_[splitname])
+				plt.ylabel(r'Performance')
 				plt.xlabel(r'$\alpha$')
 				plt.title('Lasso Performance')
 				plt.ylim([-0.01, 1.0])
-				plt.legend()
 				plt.show()
+		else:
+			self.lasso =  Lasso(alpha=self.alpha_lasso, max_iter=10000)
+			self.lasso.fit(self.X_train, self.Y_train)
 
-		self.lasso.set_params(alpha=self.alpha_lasso)
-		self.lasso.fit(self.X_train, self.Y_train)
 		self.Y_pred_lasso = pd.DataFrame(self.lasso.predict(self.X_test),index=self.Y_test.index,columns=self.Y_test.keys())
 		if self.perform == 'Bray-Curtis':
 			self.r2_train_lasso = r2_bc(self.Y_train.values,self.lasso.predict(self.X_train),self.Y_null)
@@ -166,42 +148,26 @@ class mh_predict:
 
 		return self.lasso.coef_, self.r2_train_lasso, self.r2_test_lasso
 
-	def run_ridge(self,cross_validate=False,plot=False,lb=1,ub=6,ns=15):
-		self.ridge=Ridge(max_iter=10000)
-
+	def run_ridge(self,cross_validate=False,plot=False,lb=1,ub=6,ns=15,n_splits=50):
 		if cross_validate:
-			alphas = np.logspace(lb, ub, ns)
-			r2_train = []
-			r2_test = []
-			coeffs = []
-			for a in alphas:
-				self.ridge.set_params(alpha=a)
-				self.ridge.fit(self.X_train, self.Y_train)
-				if self.perform == 'Bray-Curtis':
-					r2_train.append(r2_bc(self.Y_train.values,self.ridge.predict(self.X_train),self.Y_null))
-					r2_test.append(r2_bc(self.Y_test.values,self.ridge.predict(self.X_test),self.Y_null))
-				else:
-					r2_train.append(r2_score(self.Y_train.values,self.ridge.predict(self.X_train),multioutput='variance_weighted'))
-					r2_test.append(r2_score(self.Y_test.values,self.ridge.predict(self.X_test),multioutput='variance_weighted'))
-				coeffs.append(self.ridge.coef_.reshape(-1))
-			self.alpha_ridge = alphas[np.argmax(r2_test)]
+			params = {'alpha':np.logspace(lb, ub, ns)}
+			self.ridge = GridSearchCV(Ridge(max_iter=10000),params,cv=GroupShuffleSplit(n_splits=n_splits).split(self.X_train,groups=self.X_train.reset_index()['Carbon_Source']),
+				refit = best_alpha_UCB)
+			self.ridge.fit(self.X_train, self.Y_train)
+			self.ridge.coef_ = self.ridge.best_estimator_.coef_
+			self.alpha_ridge = self.ridge.best_estimator_.alpha
 			if plot:
-				plt.semilogx(alphas,np.abs(coeffs))
-				plt.xlabel(r'$\alpha$')
-				plt.ylabel(r'$|w_i|$')
-				plt.title('Ridge Coefficients')
-				plt.show()
-				plt.semilogx(alphas,r2_train,'k',label='Train')
-				plt.semilogx(alphas,r2_test,'k--',label='Test')
-				plt.ylabel(r'Performance ('+self.perform+')')
+				for splitname in ['split'+str(k)+'_test_score' for k in range(n_splits)]:
+					plt.semilogx(self.ridge.cv_results_['param_alpha'],self.ridge.cv_results_[splitname])
+				plt.ylabel(r'Performance')
 				plt.xlabel(r'$\alpha$')
 				plt.title('Ridge Performance')
 				plt.ylim([-0.01, 1.0])
-				plt.legend()
 				plt.show()
+		else:
+			self.ridge =  Ridge(alpha=self.alpha_ridge, max_iter=10000)
+			self.ridge.fit(self.X_train, self.Y_train)
 
-		self.ridge.set_params(alpha=self.alpha_ridge)
-		self.ridge.fit(self.X_train, self.Y_train)
 		self.Y_pred_ridge = pd.DataFrame(self.ridge.predict(self.X_test),index=self.Y_test.index,columns=self.Y_test.keys())
 		if self.perform == 'Bray-Curtis':
 			self.r2_train_ridge = r2_bc(self.Y_train.values,self.ridge.predict(self.X_train),self.Y_null)
@@ -225,22 +191,34 @@ class mh_predict:
 
 		return self.linear.coef_, self.r2_train_linear, self.r2_test_linear
 
-	def run_knn(self,metric='euclidean'):
+	def run_knn(self):
 		Y_train = self.Y_train.groupby(level=0).mean()
 		X_train = self.X_train.groupby(level=0).mean()
-		Y_pred = self.Y_test.copy()
 
-		for idx in self.X_test.index:
-			x = np.ones((len(X_train),1)).dot(self.X_test.loc[idx].values[np.newaxis,:])
-			nn = X_train.index[np.argmin(cdist(x,X_train.values,metric = metric))]
-			Y_pred.loc[idx] = Y_train.loc[nn]
+		self.knn = KNeighborsRegressor(n_neighbors=1)
+		self.knn.fit(X_train,Y_train)
+
+		self.Y_pred_knn = pd.DataFrame(self.knn.predict(self.X_test),index=self.Y_test.index,columns=self.Y_test.keys())
+
 		if self.perform == 'Bray-Curtis':
-			self.r2_test_KNN = r2_bc(self.Y_test.values,Y_pred.values,self.Y_null)
+			self.r2_test_knn = r2_bc(self.Y_test.values,self.Y_pred_knn.values,self.Y_null)
 		else:
-			self.r2_test_KNN = r2_score(self.Y_test.values,Y_pred.values,multioutput='variance_weighted')
-		self.Y_pred_KNN = Y_pred
+			self.r2_test_knn = r2_score(self.Y_test.values,self.Y_pred_knn.values,multioutput='variance_weighted')
 
-		return self.r2_test_KNN
+		return self.r2_test_knn
+
+	def run_random_forest(self):
+		self.forest = RandomForestRegressor()
+		self.forest.fit(self.X_train,self.Y_train)
+		self.Y_pred_forest = pd.DataFrame(self.forest.predict(self.X_test),index=self.X_test.index,columns=self.Y_test.keys())
+
+		if self.perform == 'Bray-Curtis':
+			self.r2_test_forest = r2_bc(self.Y_test.values,self.Y_pred_forest.values,self.Y_null)
+		else:
+			self.r2_test_forest = r2_score(self.Y_test.values,self.Y_pred_forest.values,multioutput='variance_weighted')
+
+		return self.forest.feature_importances_, self.r2_test_forest
+
 
 
 
