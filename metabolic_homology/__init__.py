@@ -135,6 +135,7 @@ class mh_predict:
 			self.lasso.fit(self.X_train, self.Y_train)
 			self.lasso.coef_ = self.lasso.best_estimator_.coef_
 			self.alpha_lasso = self.lasso.best_estimator_.alpha
+			self.estimators['LASSO'] = self.lasso.best_estimator_
 			if plot:
 				for splitname in ['split'+str(k)+'_test_score' for k in range(n_splits)]:
 					plt.semilogx(self.lasso.cv_results_['param_alpha'],self.lasso.cv_results_[splitname])
@@ -146,11 +147,11 @@ class mh_predict:
 		else:
 			self.lasso =  Lasso(alpha=self.alpha_lasso, max_iter=10000)
 			self.lasso.fit(self.X_train, self.Y_train)
+			self.estimators['LASSO'] = self.lasso
 
 		self.Y_pred['LASSO'] = pd.DataFrame(self.lasso.predict(self.X_test),index=self.Y_test.index,columns=self.Y_test.keys())
 		self.train_score['LASSO'] = r2_custom(self.Y_train.values,self.lasso.predict(self.X_train),metric=self.metric)
 		self.test_score['LASSO'] = r2_custom(self.Y_test.values,self.lasso.predict(self.X_test),metric=self.metric)
-		self.estimators['LASSO'] = self.lasso.best_estimator_
 
 	def run_ridge(self,cross_validate=False,plot=False,lb=1,ub=6,ns=15,n_splits=20):
 		if cross_validate:
@@ -160,6 +161,7 @@ class mh_predict:
 			self.ridge.fit(self.X_train, self.Y_train)
 			self.ridge.coef_ = self.ridge.best_estimator_.coef_
 			self.alpha_ridge = self.ridge.best_estimator_.alpha
+			self.estimators['Ridge'] = self.ridge.best_estimator_
 			if plot:
 				for splitname in ['split'+str(k)+'_test_score' for k in range(n_splits)]:
 					plt.semilogx(self.ridge.cv_results_['param_alpha'],self.ridge.cv_results_[splitname])
@@ -171,11 +173,11 @@ class mh_predict:
 		else:
 			self.ridge =  Ridge(alpha=self.alpha_ridge, max_iter=10000)
 			self.ridge.fit(self.X_train, self.Y_train)
+			self.estimators['Ridge'] = self.ridge
 
 		self.Y_pred['Ridge'] = pd.DataFrame(self.ridge.predict(self.X_test),index=self.Y_test.index,columns=self.Y_test.keys())
 		self.train_score['Ridge'] = r2_custom(self.Y_train.values,self.ridge.predict(self.X_train),metric=self.metric)
 		self.test_score['Ridge'] = r2_custom(self.Y_test.values,self.ridge.predict(self.X_test),metric=self.metric)
-		self.estimators['Ridge'] = self.ridge.best_estimator_
 
 	def run_elastic_net(self,cross_validate=False,plot=False,lb=[-3,-2],ub=[2,0],ns=5,n_splits=20):
 		if cross_validate:
@@ -186,6 +188,7 @@ class mh_predict:
 			self.net.coef_ = self.net.best_estimator_.coef_
 			self.alpha_net = self.net.best_estimator_.alpha
 			self.l1_ratio_net = self.net.best_estimator_.l1_ratio
+			self.estimators['Elastic Net'] = self.net.best_estimator_
 			if plot:
 				sns.heatmap(pd.pivot_table(pd.DataFrame(self.net.cv_results_),index='param_alpha',columns='param_l1_ratio',values='mean_test_score') +
 					pd.pivot_table(pd.DataFrame(self.net.cv_results_),index='param_alpha',columns='param_l1_ratio',values='std_test_score'))
@@ -194,11 +197,11 @@ class mh_predict:
 		else:
 			self.net =  ElasticNet(alpha=self.alpha_net,l1_ratio=self.l1_ratio_net, max_iter=10000)
 			self.net.fit(self.X_train, self.Y_train)
+			self.estimators['Elastic Net'] = self.net
 
 		self.Y_pred['Elastic Net'] = pd.DataFrame(self.net.predict(self.X_test),index=self.Y_test.index,columns=self.Y_test.keys())
 		self.train_score['Elastic Net'] = r2_custom(self.Y_train.values,self.net.predict(self.X_train),metric=self.metric)
 		self.test_score['Elastic Net'] = r2_custom(self.Y_test.values,self.net.predict(self.X_test),metric=self.metric)
-		self.estimators['Elastic Net'] = self.net.best_estimator_
 
 	def run_kernel_ridge(self,cross_validate=False,plot=False,lb=[-2,-3],ub=[2,0],ns=5,n_splits=20,kernel='rbf'):
 		if cross_validate:
@@ -208,6 +211,7 @@ class mh_predict:
 			self.kridge.fit(self.X_train, self.Y_train)
 			self.alpha_kridge = self.kridge.best_estimator_.alpha
 			self.gamma_kridge = self.kridge.best_estimator_.gamma
+			self.estimators['Kernel Ridge'] = self.kridge.best_estimator_
 			if plot:
 				sns.heatmap(pd.pivot_table(pd.DataFrame(self.kridge.cv_results_),index='param_alpha',columns='param_gamma',values='mean_test_score') +
 					pd.pivot_table(pd.DataFrame(self.kridge.cv_results_),index='param_alpha',columns='param_gamma',values='std_test_score'))
@@ -216,11 +220,11 @@ class mh_predict:
 		else:
 			self.kridge = KernelRidge(alpha=self.alpha_kridge,gamma=self.gamma_kridge)
 			self.kridge.fit(self.X_train, self.Y_train)
+			self.estimators['Kernel Ridge'] = self.kridge
 
 		self.Y_pred['Kernel Ridge'] = pd.DataFrame(self.kridge.predict(self.X_test),index=self.Y_test.index,columns=self.Y_test.keys())
 		self.train_score['Kernel Ridge'] = r2_custom(self.Y_train.values,self.kridge.predict(self.X_train),metric=self.metric)
 		self.test_score['Kernel Ridge'] = r2_custom(self.Y_test.values,self.kridge.predict(self.X_test),metric=self.metric)
-		self.estimators['Kernel Ridge'] = self.kridge.best_estimator_
 
 	def run_linear(self):
 		self.linear=LinearRegression()
@@ -251,6 +255,12 @@ class mh_predict:
 		self.train_score['Random Forest'] = r2_custom(self.Y_train.values,self.forest.predict(self.X_train),metric=self.metric)
 		self.test_score['Random Forest'] = r2_custom(self.Y_test.values,self.forest.predict(self.X_test),metric=self.metric)
 		self.estimators['Random Forest'] = self.forest
+
+	def regenerate_predictions(self):
+		for method in self.estimators.keys():
+			self.Y_pred[method] = pd.DataFrame(self.estimators[method].predict(self.X_test),index=self.Y_test.index,columns=self.Y_test.keys())
+			self.train_score[method] = r2_custom(self.Y_train.values,self.estimators[method].predict(self.X_train),metric=self.metric)
+			self.test_score[method] = r2_custom(self.Y_test.values,self.estimators[method].predict(self.X_test),metric=self.metric)
 
 
 
