@@ -15,7 +15,7 @@ import seaborn as sns
 import pickle
 from scipy.spatial.distance import *
 
-def r2_custom(y_true,y_pred,metric='braycurtis'):
+def r2_custom(y_true,y_pred,metric='braycurtis',epsilon=1e-10):
     y_true = np.hstack([y_true,(1-y_true.sum(axis=1))[:,np.newaxis]])
     y_pred = np.hstack([y_pred,(1-y_pred.sum(axis=1))[:,np.newaxis]])
     y_null = y_true.mean(axis=0)[np.newaxis,:]
@@ -23,7 +23,7 @@ def r2_custom(y_true,y_pred,metric='braycurtis'):
     d = np.diag(cdist(y_true,y_pred,metric=metric))
     d_null = cdist(y_true,y_null,metric=metric).squeeze()
 
-    return (d_null-d).mean()/d_null.mean()
+    return (d_null-d).mean()/(d_null.mean()+epsilon)
 
 def best_alpha_UCB(cv_results):
 	UCB = cv_results['mean_test_score']+cv_results['std_test_score']
@@ -145,7 +145,7 @@ class mh_predict:
 				plt.ylim([-0.01, 1.0])
 				plt.show()
 		else:
-			self.lasso =  Lasso(alpha=self.alpha_lasso, max_iter=10000)
+			self.lasso =  Lasso(alpha=self.alpha_lasso, max_iter=100000)
 			self.lasso.fit(self.X_train, self.Y_train)
 			self.estimators['LASSO'] = self.lasso
 
